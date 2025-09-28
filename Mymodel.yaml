@@ -1,0 +1,55 @@
+# mydata.yaml
+
+USER_ID_FIELD: 'user_id'
+ITEM_ID_FIELD: 'item_id'
+RATING_FIELD: 'rating'
+TIME_FIELD: 'timestamp'
+
+train_batch_size: 2048
+epochs: 50
+hidden_size: 128  # 与SEM的d_model保持一致
+gpu_id: '0'
+train_neg_sample_args: {}  # 空字典避免解析错误
+
+MAX_ITEM_LIST_LENGTH: 50  # 序列最大长度，需与SEM的pos_emb容量匹配
+
+# -------------------------- 新增：多兴趣SEM配置 --------------------------
+# SEM聚类参数（仅第一层生效，控制兴趣数量）
+quantizer:
+  clusters_per_layer: [8]  # 第一层SEM聚类数=8（即生成8个兴趣）
+
+# SEM模型细节参数
+model:
+  add_pos: True  # 是否添加位置编码（建议开启）
+  sem_noise: 0.01  # SEM嵌入训练时的高斯噪声强度（增强泛化）
+
+# -------------------------- 原有模型参数补充 --------------------------
+n_layers: 2  # STU编码器层数
+n_heads: 2  # 多头注意力头数
+inner_size: 512  # STU的feedforward维度（默认4*hidden_size）
+hidden_dropout_prob: 0.2  # 嵌入层dropout
+attn_dropout_prob: 0.2  # 注意力层dropout
+layer_norm_eps: 1e-6  # 层归一化epsilon
+initializer_range: 0.02  # 权重初始化范围
+
+# -------------------------- 评估与优化参数 --------------------------
+eval_args:
+  split:
+    LS: 'valid_and_test'
+  group_by: 'user'
+  order: 'TO'
+  mode: 'full'  # 全量评估
+
+load_col:
+  inter: ['user_id', 'item_id', 'rating', 'timestamp']
+
+fields:
+  user_id: 'token'
+  item_id: 'token'
+  rating: 'float'
+  timestamp: 'float'
+
+eval_batch_size: 2048
+loss_type: 'CE'  # 与多兴趣模型兼容（支持CE/BPR）
+learning_rate: 0.0001
+topk: [10]

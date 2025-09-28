@@ -1,0 +1,45 @@
+# mydata.yaml
+
+USER_ID_FIELD: 'user_id'
+ITEM_ID_FIELD: 'item_id'
+RATING_FIELD: 'rating'
+TIME_FIELD: 'timestamp'
+
+
+train_batch_size: 1024
+stopping_step: 100
+epochs: 5
+
+gpu_id: '0'
+train_neg_sample_args: 
+eval_args:
+  split:
+    LS: 'valid_and_test'
+  group_by: 'user'
+  order: 'TO'
+  mode: 'uni99'
+
+load_col:
+  inter: ['user_id', 'item_id', 'rating', 'timestamp']
+  item: ['item_id', 'title', 'class']
+
+MAX_ITEM_LIST_LENGTH: 60
+
+
+
+fields:
+  user_id: 'token'
+  item_id: 'token'
+  rating: 'float'
+  timestamp: 'float'
+
+eval_batch_size: 4096
+eval_step: 1
+eval_neg_sample_args:
+  neg_sampling: {'uniform': 99} 
+  
+hidden_size: 128
+n_heads: 1
+learning_rate: 0.001
+
+topk: [10]
