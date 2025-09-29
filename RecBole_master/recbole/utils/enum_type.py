@@ -26,6 +26,7 @@ class ModelType(Enum):
     KNOWLEDGE = 4
     TRADITIONAL = 5
     DECISIONTREE = 6
+    SEM_SEQUENTIAL = 7
 
 
 class KGDataLoaderState(Enum):

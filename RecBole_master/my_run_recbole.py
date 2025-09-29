@@ -1,6 +1,7 @@
 from recbole.config import Config
 from recbole.data import create_dataset, data_preparation
 from recbole.model.sequential_recommender import SASRec, DIN, SRGNN, DIEN, S3Rec, FEARec, CORE, Mymodel
+from recbole.data.dataset.sem_sequential_dataset import SemEnhancedSequentialDataset
 from recbole.trainer import Trainer
 from recbole.utils import init_seed, init_logger
 from logging import getLogger
@@ -43,11 +44,14 @@ if __name__ == '__main__':
     logger.info(config)
 
     # 数据集创建与过滤
+
     dataset = create_dataset(config)
     logger.info(dataset)
 
     # 数据集分割
     train_data, valid_data, test_data = data_preparation(config, dataset)
+    
+    pdb.set_trace()
     print('_'*10)
     print(len(train_data))
     print(len(valid_data))

@@ -41,7 +41,8 @@ def create_dataset(config):
     if hasattr(dataset_module, config["model"] + "Dataset"):
         dataset_class = getattr(dataset_module, config["model"] + "Dataset")
     else:
-        model_type = config["MODEL_TYPE"]
+        model_type_str = config["MODEL_TYPE"]
+        model_type = ModelType[model_type_str]  
         type2class = {
             ModelType.GENERAL: "Dataset",
             ModelType.SEQUENTIAL: "SequentialDataset",
@@ -49,6 +50,7 @@ def create_dataset(config):
             ModelType.KNOWLEDGE: "KnowledgeBasedDataset",
             ModelType.TRADITIONAL: "Dataset",
             ModelType.DECISIONTREE: "Dataset",
+            ModelType.SEM_SEQUENTIAL: "SemEnhancedSequentialDataset",
         }
         dataset_class = getattr(dataset_module, type2class[model_type])
 

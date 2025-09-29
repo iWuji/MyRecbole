@@ -197,7 +197,7 @@ class FullSortEvalDataLoader(AbstractDataLoader):
         self.logger = getLogger()
         self.uid_field = dataset.uid_field
         self.iid_field = dataset.iid_field
-        self.is_sequential = config["MODEL_TYPE"] == ModelType.SEQUENTIAL
+        self.is_sequential = (config["MODEL_TYPE"] == ModelType.SEQUENTIAL or config["MODEL_TYPE"] == 'SEM_SEQUENTIAL')
         if not self.is_sequential:
             user_num = dataset.user_num
             self.uid_list = []
@@ -257,6 +257,7 @@ class FullSortEvalDataLoader(AbstractDataLoader):
 
     def collate_fn(self, index):
         index = np.array(index)
+        self.is_sequential = True
         if not self.is_sequential:
             user_df = self.user_df[index]
             uid_list = list(user_df[self.uid_field])
