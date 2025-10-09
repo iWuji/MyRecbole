@@ -28,6 +28,8 @@ class SemEnhancedSequentialDataset(Dataset):
         self.item_list_length_field = config["ITEM_LIST_LENGTH_FIELD"]
         self.pad_token = 0  # 所有字段的Pad值统一为0
         self.sem_pad_token = self.pad_token  # Sem Pad=0，与其他Pad统一
+
+        self.item_sem_mask_field = "item_sem_mask"  # mask字段名称（存储1=Sem，0=Item）
         
         # -------------------------- 2. Sem映射配置 --------------------------
         # Sem字典路径（默认值：item_semantic_dict.pkl）
@@ -128,6 +130,13 @@ class SemEnhancedSequentialDataset(Dataset):
 
         # 注册序列长度字段
         self.set_field_property(self.item_list_length_field, FeatureType.TOKEN, FeatureSource.INTERACTION, 1)
+        # 注册Sem掩码字段（与混合序列长度相同）
+        self.set_field_property(
+            self.item_sem_mask_field, 
+            FeatureType.TOKEN_SEQ, 
+            FeatureSource.INTERACTION, 
+            self.actual_seq_len  # 与混合序列长度相同
+        )
 
     def data_augmentation(self):
         """简化版：遍历用户时直接生成混合序列（Item+Sem交替，Pad=0）"""
@@ -140,6 +149,7 @@ class SemEnhancedSequentialDataset(Dataset):
         last_uid = None
         target_index = []  # 目标Item索引
         mixed_sequences = []  # 混合序列（Item+Sem）
+        mask_sequences = []  # 新增：对应的mask序列
         seq_lengths = []  # 混合序列实际长度
         seq_start = 0
         all_items = self.inter_feat[self.iid_field].numpy()  # 预取所有Item
@@ -160,16 +170,20 @@ class SemEnhancedSequentialDataset(Dataset):
                 current_items = all_items[seq_start:i].tolist()
                 # 构建混合序列（Item + Sem，无映射用Pad=0）
                 mixed_seq = []
+                mask_seq = []  # 新增：当前序列的mask
                 for item in current_items:
                     mixed_seq.append(item)  # 添加Item
+                    mask_seq.append(0)  # Item位置为0
                     # 获取Sem ID（转换为模型用的ID：sem_start + sem_id）
                     sem_id_0based = self.item_to_sem.get(item, self.sem_pad_token)
                     sem_token_id = self.sem_start + sem_id_0based if sem_id_0based != self.sem_pad_token else self.sem_pad_token
                     mixed_seq.append(sem_token_id)  # 添加Sem/Pad
+                    mask_seq.append(1 if sem_token_id != self.sem_pad_token else 0)  # Sem有效时为1，Pad为0
 
                 # 记录关键信息
                 target_index.append(i)  # 目标Item是当前i位置的Item
                 mixed_sequences.append(mixed_seq)
+                mask_sequences.append(mask_seq)  # 新增：保存mask
                 seq_lengths.append(len(mixed_seq))  # 混合序列实际长度
 
         # 3. 初始化新数据结构
@@ -188,6 +202,11 @@ class SemEnhancedSequentialDataset(Dataset):
         for i, seq in enumerate(mixed_sequences):
             new_dict[item_list_field][i, :len(seq)] = torch.tensor(seq, dtype=torch.long)
 
+        new_dict[self.item_sem_mask_field] = torch.full(
+            (new_length, item_list_len), fill_value=0, dtype=torch.long  # mask的Pad为0
+        )
+        for i, mask in enumerate(mask_sequences):
+            new_dict[self.item_sem_mask_field][i, :len(mask)] = torch.tensor(mask, dtype=torch.long)
         # 5. 填充其他字段（如timestamp/rating，Pad=0）
         for field in self.inter_feat:
             if field == self.uid_field or field == self.iid_field:
@@ -215,17 +234,23 @@ class SemEnhancedSequentialDataset(Dataset):
         self.logger.debug(f"混合序列生成完成：{new_length}条，平均长度{np.mean(seq_lengths):.1f}")
 
     def _benchmark_presets(self):
-        """基准数据集处理（Pad=0，混合序列生成）"""
+        """基准数据集处理（新增mask生成）"""
         list_suffix = self.config["LIST_SUFFIX"]
         for field in self.inter_feat:
             if field + list_suffix in self.inter_feat:
                 list_field = field + list_suffix
                 setattr(self, f"{field}_list_field", list_field)
         
-        # 注册序列长度字段
+        # 注册序列长度和mask字段（新增mask）
         self.set_field_property(self.item_list_length_field, FeatureType.TOKEN, FeatureSource.INTERACTION, 1)
+        self.set_field_property(
+            self.item_sem_mask_field, 
+            FeatureType.TOKEN_SEQ, 
+            FeatureSource.INTERACTION, 
+            self.actual_seq_len
+        )
 
-        # 处理Item混合序列（Pad=0）
+        # 处理Item混合序列（原有）
         item_list_field = getattr(self, f"{self.iid_field}_list_field")
         if item_list_field not in self.inter_feat:
             self.logger.warning(f"基准数据集缺少{item_list_field}，跳过Sem处理")
@@ -234,37 +259,43 @@ class SemEnhancedSequentialDataset(Dataset):
         item_seqs = self.inter_feat[item_list_field].numpy()
         user_ids = self.inter_feat[self.uid_field].numpy()
         mixed_seqs = []
+        mask_seqs = []  # 新增：基准数据集的mask
         seq_lengths = []
         last_uid = None
-        seq_len_fixed = item_seqs.shape[1]  # 基准数据集序列长度固定
+        seq_len_fixed = item_seqs.shape[1]
 
-        # 逐用户生成混合序列
+        # 逐用户生成混合序列和mask
         for uid, item_seq in zip(user_ids, item_seqs):
             if last_uid != uid:
                 last_uid = uid
             
             mixed_seq = []
+            mask_seq = []  # 新增：当前序列的mask
             for item in item_seq:
                 if item == self.pad_token:
-                    break  # 遇到Pad停止处理
-                # 添加Item
+                    break
+                # 添加Item（mask=0）
                 mixed_seq.append(item)
-                # 添加Sem（无映射用Pad=0）
+                mask_seq.append(0)
+                # 添加Sem（mask=1，Pad=0）
                 sem_id_0based = self.item_to_sem.get(item, self.sem_pad_token)
                 sem_token_id = self.sem_start + sem_id_0based if sem_id_0based != self.sem_pad_token else self.sem_pad_token
                 mixed_seq.append(sem_token_id)
+                mask_seq.append(1 if sem_token_id != self.sem_pad_token else 0)
             
-            # 补Pad=0至固定长度
+            # 补Pad（混合序列补0，mask也补0）
             mixed_seq += [self.pad_token] * (seq_len_fixed - len(mixed_seq))
+            mask_seq += [0] * (seq_len_fixed - len(mask_seq))  # mask的Pad为0
             mixed_seqs.append(mixed_seq)
-            # 计算实际长度（不含Pad）
+            mask_seqs.append(mask_seq)  # 新增：保存mask
             actual_len = len([x for x in mixed_seq if x != self.pad_token])
             seq_lengths.append(actual_len)
 
-        # 更新基准数据
+        # 更新基准数据（新增mask）
         self.inter_feat[item_list_field] = torch.tensor(mixed_seqs, dtype=torch.long)
+        self.inter_feat[self.item_sem_mask_field] = torch.tensor(mask_seqs, dtype=torch.long)  # 新增：添加mask字段
         self.inter_feat[self.item_list_length_field] = torch.tensor(seq_lengths, dtype=torch.long)
-        self.logger.debug(f"基准数据集处理完成：{len(mixed_seqs)}条混合序列")
+        self.logger.debug(f"基准数据集处理完成：{len(mixed_seqs)}条混合序列及mask")
 
     def inter_matrix(self, form="coo", value_field=None):
         """生成交互矩阵（忽略Sem，仅保留Item）"""

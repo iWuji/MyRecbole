@@ -77,7 +77,7 @@ class STULayer(nn.Module):
 
 
 class Mymodel(SequentialRecommender):
-    r"""统一索引逻辑的语义增强模型（1-based语义token适配）"""
+    r"""统一索引逻辑的语义增强模型（支持两种多兴趣生成方式）"""
 
     def __init__(self, config, dataset):
         super(Mymodel, self).__init__(config, dataset)
@@ -92,6 +92,10 @@ class Mymodel(SequentialRecommender):
         self.loss_type = config["loss_type"]
         self.max_seq_length = config["MAX_ITEM_LIST_LENGTH"] * 2  # 适配混合序列（Item+Sem）
         self.ITEM_LIST_LENGTH_FIELD = config['ITEM_LIST_LENGTH_FIELD']
+        
+        # 新增：控制多兴趣生成方式的参数
+        self.use_history_sem = config.get("use_history_sem", False)  # True:使用历史Sem, False:使用所有预定义Sem
+        self.min_history_sem = config.get("min_history_sem", 3)  # 历史Sem不足时的补充数量
         
         # 统一Pad值（0号为Pad，所有字段一致）
         self.pad_token = 0
@@ -174,7 +178,8 @@ class Mymodel(SequentialRecommender):
             f"- Item索引范围：0~{self.n_items-1}（嵌入维度{self.n_items}）\n"
             f"- Sem Token ID范围：{self.sem_token_start}~{self.sem_token_end}（嵌入维度{self.num_sem+1}）\n"
             f"- 有效语义类别数：{self.num_sem}（嵌入索引1~{self.num_sem}）\n"
-            f"- 混合序列最大长度：{self.max_seq_length}"
+            f"- 混合序列最大长度：{self.max_seq_length}\n"
+            f"- 多兴趣生成方式：{'用户历史Sem' if self.use_history_sem else '所有预定义Sem'}"
         )
 
     def _init_weights(self, module):
@@ -227,23 +232,75 @@ class Mymodel(SequentialRecommender):
         output_tensor = output.gather(dim=1, index=gather_index)  # [B, 1, H]
         return output_tensor.squeeze(1)  # [B, H]
 
-    def _generate_multi_interest(self, last_valid_emb):
-        """基于最后有效特征生成多兴趣（仅用有效语义向量）"""
+    def _get_history_sem_embeddings(self, encoded, item_sem_mask, item_seq_len):
+        """提取用户历史中Sem Token经过encoder后的嵌入（向量化实现，无显式循环）"""
+        B, T, H = encoded.shape
+        device = encoded.device
+        
+        # 1. 生成有效序列掩码（仅保留每个样本的有效长度部分）
+        # [B, T] → True表示该位置在有效序列内
+        valid_seq_mask = torch.arange(T, device=device).unsqueeze(0) < item_seq_len.unsqueeze(1)
+        
+        # 2. 找到所有Sem Token的位置（mask=1且在有效序列内）
+        # [B, T] → True表示是有效Sem Token位置
+        sem_mask = (item_sem_mask == 1) & valid_seq_mask
+        
+        # 3. 计算每个样本的Sem Token数量（K）
+        sem_counts = sem_mask.sum(dim=1)  # [B]，每个样本的Sem数量（K≥1）
+        max_k = sem_counts.max().item()   # batch内最大的Sem数量
+        
+        # 4. 生成批次索引和位置索引，用于提取Sem嵌入
+        # 4.1 生成每个样本的位置索引（按顺序取Sem位置）
+        # [B, T] → 每个位置的累积计数（仅Sem位置递增）
+        sem_cumsum = sem_mask.cumsum(dim=1)
+        # 生成目标索引矩阵（[B, max_k]），用于后续填充
+        target_indices = torch.arange(max_k, device=device).unsqueeze(0).expand(B, -1) + 1  # [B, max_k]
+        
+        # 4.2 找到满足条件的位置（累积计数 ≤ max_k 且 是Sem位置）
+        # 生成掩码：哪些位置需要被选中填充到目标矩阵
+        select_mask = (sem_cumsum <= max_k) & sem_mask  # [B, T]
+        
+        # 4.3 提取对应的批次索引和时间步索引
+        batch_idx, time_idx = torch.where(select_mask)  # 均为[total_sems]
+        
+        # 5. 提取所有Sem Token的encoder嵌入
+        # [total_sems, H] → 所有样本的Sem嵌入按顺序排列
+        all_sem_embs = encoded[batch_idx, time_idx, :]
+        
+        # 6. 构建目标矩阵（[B, max_k, H]），用0填充
+        sem_emb_tensor = torch.zeros(B, max_k, H, device=device)
+        # 计算在目标矩阵中的位置索引（每个样本内的相对位置）
+        pos_in_target = sem_cumsum[batch_idx, time_idx] - 1  # [total_sems]
+        # 填充目标矩阵
+        sem_emb_tensor[batch_idx, pos_in_target, :] = all_sem_embs
+        
+        return sem_emb_tensor
+
+
+    def _generate_multi_interest(self, last_valid_emb, encoded=None, item_sem_mask=None, item_seq_len=None):
+        """基于最后有效特征生成多兴趣（支持两种方式）"""
         B, H = last_valid_emb.shape
         
-        # 取有效语义向量（索引1~num_sem，排除Pad索引0）
-        valid_sem_indices = torch.arange(1, self.num_sem + 1, device=self.device)  # [1, 2, ..., num_sem]
-        sem_emb = self.sem_embedding(valid_sem_indices)  # [num_sem, H]
-        sem_emb_norm = F.normalize(sem_emb, p=2, dim=-1)
+        if self.use_history_sem and encoded is not None and item_sem_mask is not None and item_seq_len is not None:
+            # 方式1：使用用户历史中Sem Token经过encoder后的嵌入
+            sem_emb = self._get_history_sem_embeddings(encoded, item_sem_mask, item_seq_len)  # [B, K, H]
+            sem_emb_norm = F.normalize(sem_emb, p=2, dim=-1)
+        else:
+            # 方式2：使用所有预定义的有效语义向量（原始逻辑）
+            valid_sem_indices = torch.arange(1, self.num_sem + 1, device=self.device)  # [1, 2, ..., num_sem]
+            sem_emb = self.sem_embedding(valid_sem_indices)  # [num_sem, H]
+            sem_emb_norm = F.normalize(sem_emb, p=2, dim=-1).unsqueeze(0).expand(B, -1, -1)  # [B, num_sem, H]
         
         # 计算注意力权重
-        last_valid_norm = F.normalize(last_valid_emb, p=2, dim=-1)  # [B, H]
-        att_scores = torch.matmul(last_valid_norm.unsqueeze(1), sem_emb_norm.T).squeeze(1)  # [B, num_sem]
+        last_valid_norm = F.normalize(last_valid_emb, p=2, dim=-1).unsqueeze(1)  # [B, 1, H]
+        att_scores = torch.matmul(last_valid_norm, sem_emb_norm.transpose(-2, -1)).squeeze(1)  # [B, K]
         att_scores_balanced = torch.pow(torch.abs(att_scores) + 1e-8, 0.5) * torch.sign(att_scores)  # 平衡权重
-        att_weights = F.softmax(att_scores_balanced, dim=1).unsqueeze(2)  # [B, num_sem, 1]
+        att_weights = F.softmax(att_scores_balanced, dim=1).unsqueeze(2)  # [B, K, 1]
         
         # 生成多兴趣（加权求和）
-        multi_interest = last_valid_emb.unsqueeze(1) * att_weights  # [B, num_sem, H]
+        multi_interest = torch.matmul(sem_emb_norm.transpose(1, 2), att_weights).transpose(1, 2)  # [B, 1, H]
+        # 扩展到固定数量的兴趣（num_interest）
+        multi_interest = multi_interest.expand(-1, self.num_interest, -1)
         multi_interest = self.interest_dropout(multi_interest)
         
         return multi_interest
@@ -259,7 +316,7 @@ class Mymodel(SequentialRecommender):
         
         return best_interest
 
-    def forward(self, item_seq, item_seq_len):
+    def forward(self, item_seq, item_seq_len, item_sem_mask):
         """前向传播（统一索引转换，无越界风险）"""
         B, T = item_seq.shape
         device = self.device
@@ -303,8 +360,13 @@ class Mymodel(SequentialRecommender):
         # 提取最后有效位置特征（item_seq_len-1：序列长度对应最后一个有效Token）
         last_valid_index = item_seq_len - 1  # [B]
         last_valid_emb = self.gather_indexes(encoded, last_valid_index)  # [B, H]
-        # 生成多兴趣
-        multi_interest = self._generate_multi_interest(last_valid_emb)  # [B, num_sem, H]
+        # 生成多兴趣（根据参数选择不同方式）
+        multi_interest = self._generate_multi_interest(
+            last_valid_emb, 
+            encoded=encoded, 
+            item_sem_mask=item_sem_mask, 
+            item_seq_len=item_seq_len
+        )  # [B, num_sem, H]
 
         return multi_interest
 
@@ -314,9 +376,10 @@ class Mymodel(SequentialRecommender):
         item_seq = interaction[self.ITEM_SEQ]  # [B, T]：混合序列（Item+Sem）
         item_seq_len = interaction[self.ITEM_LIST_LENGTH_FIELD]  # [B]：序列实际长度
         pos_items = interaction[self.POS_ITEM_ID]  # [B]：目标正样本Item
+        item_sem_mask = interaction["item_sem_mask"]  # 获取mask
 
         # 前向传播获取多兴趣
-        multi_interest = self.forward(item_seq, item_seq_len)  # [B, num_sem, H]
+        multi_interest = self.forward(item_seq, item_seq_len, item_sem_mask)  # [B, num_sem, H]
         pos_emb = self.item_embedding(pos_items)  # [B, H]：正样本Item嵌入
 
         # 计算损失
@@ -350,9 +413,10 @@ class Mymodel(SequentialRecommender):
         item_seq = interaction[self.ITEM_SEQ]
         item_seq_len = interaction[self.ITEM_LIST_LENGTH_FIELD]
         test_item = interaction[self.ITEM_ID]  # [B]：待预测Item
+        item_sem_mask = interaction["item_sem_mask"]  # 获取mask
 
         # 前向传播获取多兴趣
-        multi_interest = self.forward(item_seq, item_seq_len)  # [B, num_sem, H]
+        multi_interest = self.forward(item_seq, item_seq_len, item_sem_mask)  # [B, num_sem, H]
         test_item_emb = self.item_embedding(test_item)  # [B, H]
 
         # 计算相似度（取最高兴趣的相似度作为最终得分）
@@ -365,9 +429,10 @@ class Mymodel(SequentialRecommender):
         """全量Item排序预测（用于评估）"""
         item_seq = interaction[self.ITEM_SEQ]
         item_seq_len = interaction[self.ITEM_LIST_LENGTH_FIELD]
+        item_sem_mask = interaction["item_sem_mask"]  # 获取mask
 
         # 前向传播获取多兴趣
-        multi_interest = self.forward(item_seq, item_seq_len)  # [B, num_sem, H]
+        multi_interest = self.forward(item_seq, item_seq_len, item_sem_mask)  # [B, num_sem, H]
         all_item_emb = self.item_embedding.weight  # [n_items, H]
 
         # 计算多兴趣与所有Item的相似度（取最高兴趣的相似度）
