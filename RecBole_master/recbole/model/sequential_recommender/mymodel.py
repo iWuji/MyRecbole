@@ -277,49 +277,32 @@ class Mymodel(SequentialRecommender):
 
 
     def _generate_multi_interest(self, last_valid_emb, encoded=None, item_sem_mask=None, item_seq_len=None):
-        """基于最后有效特征生成多兴趣（每个意图独立计算注意力权重，符合公式逻辑）"""
-        B, H = last_valid_emb.shape  # B: 批次大小, H: 隐藏层维度
-        num_intents = self.num_interest  # 意图数量 |$\hat{\textbf{H}}^u_t$|
+        """基于最后有效特征生成多兴趣（支持两种方式）"""
+        B, H = last_valid_emb.shape
         
-        # 获取语义嵌入（意图候选集）e($\hat{h_j}$)
         if self.use_history_sem and encoded is not None and item_sem_mask is not None and item_seq_len is not None:
-            # 方式1：用户历史中经过encoder的Sem Token作为意图候选 [B, K, H]
-            sem_emb = self._get_history_sem_embeddings(encoded, item_sem_mask, item_seq_len)
-            sem_emb_norm = F.normalize(sem_emb, p=2, dim=-1)  # 归一化意图嵌入
-            K = sem_emb_norm.shape[1]  # K: 每个用户的语义Token数量
+            # 方式1：使用用户历史中Sem Token经过encoder后的嵌入
+            sem_emb = self._get_history_sem_embeddings(encoded, item_sem_mask, item_seq_len)  # [B, K, H]
+            sem_emb_norm = F.normalize(sem_emb, p=2, dim=-1)
         else:
-            # 方式2：预定义的有效语义向量作为意图候选 [B, num_sem, H]
-            valid_sem_indices = torch.arange(1, self.num_sem + 1, device=self.device)
+            # 方式2：使用所有预定义的有效语义向量（原始逻辑）
+            valid_sem_indices = torch.arange(1, self.num_sem + 1, device=self.device)  # [1, 2, ..., num_sem]
             sem_emb = self.sem_embedding(valid_sem_indices)  # [num_sem, H]
-            sem_emb_norm = F.normalize(sem_emb, p=2, dim=-1).unsqueeze(0).expand(B, -1, -1)  # 扩展到批次维度
-            K = sem_emb_norm.shape[1]  # K: 预定义语义数量
+            sem_emb_norm = F.normalize(sem_emb, p=2, dim=-1).unsqueeze(0).expand(B, -1, -1)  # [B, num_sem, H]
         
-        # -------------------------- 公式(9)实现：目标注意力机制 --------------------------
-        # 1. 当前用户状态 $\textbf{Y}^u_t$（最后有效特征的归一化）
-        user_state = F.normalize(last_valid_emb, p=2, dim=-1)  # [B, H]
+        # 计算注意力权重
+        last_valid_norm = F.normalize(last_valid_emb, p=2, dim=-1).unsqueeze(1)  # [B, 1, H]
+        att_scores = torch.matmul(last_valid_norm, sem_emb_norm.transpose(-2, -1)).squeeze(1)  # [B, K]
+        att_scores_balanced = torch.pow(torch.abs(att_scores) + 1e-8, 0.5) * torch.sign(att_scores)  # 平衡权重
+        att_weights = F.softmax(att_scores_balanced, dim=1).unsqueeze(2)  # [B, K, 1]
         
-        # 2. 为每个意图j计算注意力分数（未归一化）
-        # 将用户状态扩展为 [B, num_intents, H]，与语义嵌入转置 [B, H, K] 矩阵乘
-        # 结果为 [B, num_intents, K]，即每个意图对每个语义Token的原始分数
-        att_scores = torch.matmul(
-            user_state.unsqueeze(1).expand(-1, num_intents, -1),  # [B, num_intents, H]
-            sem_emb_norm.transpose(-2, -1)  # [B, H, K]
-        )  # 对应公式中的 $\textbf{Y}^u_t \cdot \textbf{e}(\hat{h_j})$
-        
-        # 3. 缩放并归一化注意力权重 $\alpha_j = softmax(...)
-        att_scores_scaled = att_scores / math.sqrt(H)  # 缩放因子 $\sqrt{d}$
-        att_scores_balanced = torch.pow(torch.abs(att_scores_scaled) + 1e-8, 0.5) * torch.sign(att_scores_scaled)
-        att_weights = F.softmax(att_scores_balanced, dim=-1)  # [B, num_intents, K]，在K维度归一化
-        
-        # 4. 计算每个意图的加权表示 $\textbf{Z}_{t,j}^u = \alpha_j \cdot \textbf{e}(\hat{h_j})$
-        # 注意力权重 [B, num_intents, K] 与语义嵌入 [B, K, H] 矩阵乘
-        # 结果为 [B, num_intents, H]，每个意图对应独立的兴趣向量
-        multi_interest = torch.matmul(att_weights, sem_emb_norm)  # 加权求和
-        
-        # 应用dropout增强泛化能力
+        # 生成多兴趣（加权求和）
+        multi_interest = torch.matmul(sem_emb_norm.transpose(1, 2), att_weights).transpose(1, 2)  # [B, 1, H]
+        # 扩展到固定数量的兴趣（num_interest）
+        # multi_interest = multi_interest.expand(-1, self.num_interest, -1)
         multi_interest = self.interest_dropout(multi_interest)
         
-        return multi_interest  # [B, num_interest, H]，每个元素对应 $\textbf{Z}_{t,j}^u$
+        return multi_interest
 
     def _get_best_interest(self, multi_interest, target_emb):
         """选择与目标Item最匹配的兴趣向量"""
