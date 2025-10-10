@@ -94,7 +94,7 @@ class Mymodel(SequentialRecommender):
         self.ITEM_LIST_LENGTH_FIELD = config['ITEM_LIST_LENGTH_FIELD']
         
         # 新增：控制多兴趣生成方式的参数
-        self.use_history_sem = True
+        self.use_history_sem = False
         
         # 统一Pad值（0号为Pad，所有字段一致）
         self.pad_token = 0

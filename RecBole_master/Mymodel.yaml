@@ -24,8 +24,8 @@ semantic_dict_path: ./item_semantic_dict.pkl  # 预处理好的item语义字典�
 
 # SEM模型细节参数
 # -------------------------- 原有模型参数补充 --------------------------
-n_layers: 2  # STU编码器层数
-n_heads: 2  # 多头注意力头数
+n_layers: 1  # STU编码器层数
+n_heads: 1  # 多头注意力头数
 inner_size: 512  # STU的feedforward维度（默认4*hidden_size）
 hidden_dropout_prob: 0.2  # 嵌入层dropout
 attn_dropout_prob: 0.2  # 注意力层dropout
@@ -51,5 +51,5 @@ fields:
 
 eval_batch_size: 512
 loss_type: 'CE'  # 与多兴趣模型兼容（支持CE/BPR）
-learning_rate: 0.0001
+learning_rate: 0.001
 topk: [10]
