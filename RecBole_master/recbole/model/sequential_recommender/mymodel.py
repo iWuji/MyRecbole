@@ -297,7 +297,8 @@ class Mymodel(SequentialRecommender):
         att_weights = F.softmax(att_scores_balanced, dim=1).unsqueeze(2)  # [B, K, 1]
         
         # 生成多兴趣（加权求和）
-        multi_interest = torch.matmul(sem_emb_norm.transpose(1, 2), att_weights).transpose(1, 2)  # [B, 1, H]
+        multi_interest = sem_emb_norm * att_weights  # [B, K, H]
+        # multi_interest = torch.matmul(sem_emb_norm.transpose(1, 2), att_weights).transpose(1, 2)  # [B, 1, H]
         # 扩展到固定数量的兴趣（num_interest）
         # multi_interest = multi_interest.expand(-1, self.num_interest, -1)
         multi_interest = self.interest_dropout(multi_interest)
